@@ -39,7 +39,7 @@ class finfo(dict):
             #print json_str
             f=json.loads(json_str)
             #Lift in known keys
-            for k in ['fname','atime','ctime','mtime','size','user','group','mode']:
+            for k in ['fname','atime','ctime','mtime','size','user','group','mode', 'sha512']:
                 if f[k]:
                     self[k]=f[k]
                 else:
@@ -73,6 +73,9 @@ class finfo(dict):
 
     def get_fname(self):
         return self['fname']
+
+    def get_sha512(self):
+        return self['sha512']
 
 def load_config():
     config = ConfigParser.ConfigParser()
@@ -134,7 +137,6 @@ def cmd_list(args):
         M = imap_connect(config.get(store, 'host'),config.get(store, 'user'),config.get(store, 'password'),config.get(store, 'mailbox'))
         if len(wanted_uids)==0:
             typ, wanted_uids = M.uid('search' ,None, 'ALL')
-            print wanted_uids
             if wanted_uids[0]=='':
                 continue
         for uid in wanted_uids[0].split():
@@ -217,9 +219,17 @@ def cmd_get(args):
             #Not valid json, continue the loop
             continue
     #FIXME update the metadata as well
-    f = open(finf.get_fname(),'wb')
+    if finf.get_fname()=='':
+        fname='rfs_temp_name'
+        print 'WARNING: No filename found, using rts_temp_name'
+    else:
+        fname=finf.get_fname()
+    f = open(fname,'wb')
     f.write(pl.get_payload(decode=True))
     f.close()
+    fhash=hashfile(fname)
+    if fhash != finf.get_sha512():
+        print 'ERROR: Retrieved file does not match expected sha512'
     M.close()
     M.logout()
 
