@@ -74,6 +74,14 @@ class finfo(dict):
     def get_fname(self):
         return self['fname']
 
+def load_config():
+    config = ConfigParser.ConfigParser()
+    config.read([ os.path.expanduser('~/.rfs.conf'), 'rfs.conf'])
+    if len(config.sections())==0:
+        print 'config has no sections.'
+        sys.exit(1)
+    return config
+
 def imap_connect(host,user,password,mailbox):
     M = imaplib.IMAP4_SSL(host)
     if args.debug:
@@ -89,7 +97,6 @@ def imap_connect(host,user,password,mailbox):
             print 'Failed to create folder. Exiting.'
             sys.exit(1)
     return M
-
 
 def fetch_using_rfc822(M,uid):
     typ, data = M.uid('fetch', uid, '(RFC822)')
@@ -109,9 +116,7 @@ def fetch_using_body_one(M,uid):
     return finf
 
 def cmd_list(args):
-    config = ConfigParser.ConfigParser()
-    config.read('rfs.conf')
-
+    config=load_config()
 
     storeset=[]
     wanted_uids=[]
@@ -129,7 +134,10 @@ def cmd_list(args):
         M = imap_connect(config.get(store, 'host'),config.get(store, 'user'),config.get(store, 'password'),config.get(store, 'mailbox'))
         if len(wanted_uids)==0:
             typ, wanted_uids = M.uid('search' ,None, 'ALL')
-        for uid in wanted_uids:
+            print wanted_uids
+            if wanted_uids[0]=='':
+                continue
+        for uid in wanted_uids[0].split():
             #Fast path
             finf=fetch_using_body_one(M,uid)
             #Fallback
@@ -153,8 +161,7 @@ def cmd_list(args):
         M.logout()
 
 def cmd_put(args):
-    config = ConfigParser.ConfigParser()
-    config.read('rfs.conf')
+    config = load_config()
 
     #Check if a store has been given
     if args.store:
@@ -182,10 +189,8 @@ def cmd_put(args):
     M.close()
     M.logout()
 
-
 def cmd_get(args):
-    config = ConfigParser.ConfigParser()
-    config.read('rfs.conf')
+    config = load_config()
 
     if not ':' in args.msgid:
         print 'msgid has to have <store>:<uid> format'
@@ -211,8 +216,7 @@ def cmd_get(args):
             pl=payload
             #Not valid json, continue the loop
             continue
-    #print the metadata as requsted
-    print  '%s' % finf.get_fname()
+    #FIXME update the metadata as well
     f = open(finf.get_fname(),'wb')
     f.write(pl.get_payload(decode=True))
     f.close()
@@ -220,8 +224,7 @@ def cmd_get(args):
     M.logout()
 
 def cmd_df(args):
-    config = ConfigParser.ConfigParser()
-    config.read('rfs.conf')
+    config = load_config()
 
     print 'Remote\t\t\t\t1K-blocks\tUsed\tAvailable\tStore'
     for store in config.get('rfs','stores').split():
@@ -233,11 +236,10 @@ def cmd_df(args):
         print '%s@%s/%s\t%s\t%s\t%s\t%s' %(config.get(store, 'user'),config.get(store, 'host'),config.get(store, 'mailbox'),q_total,q_used,q_avail,store)
 
 def cmd_rm(args):
-    config = ConfigParser.ConfigParser()
-    config.read('rfs.conf')
+    config = load_config()
 
-    store=args.uid.split(':')[0]
-    uid=args.uid.split(':')[1]
+    store=args.msgid.split(':')[0]
+    uid=args.msgid.split(':')[1]
     M = imap_connect(config.get(store, 'host'),config.get(store, 'user'),config.get(store, 'password'),config.get(store, 'mailbox'))
 
     #Move to Trash, then flag as deleted, then expunge it
@@ -255,8 +257,7 @@ def cmd_rm(args):
     M.logout()
 
 def cmd_dump(args):
-    config = ConfigParser.ConfigParser()
-    config.read('rfs.conf')
+    config = load_config()
 
     store=args.uid.split(':')[0]
     uid=args.uid.split(':')[1]
@@ -266,7 +267,6 @@ def cmd_dump(args):
     print data[0][1]
     M.close()
     M.logout()
-
  
 parser = argparse.ArgumentParser(description='RFS, remote file store.')
 parser.add_argument('-d',action='store_true',help='-d debug',dest='debug')
