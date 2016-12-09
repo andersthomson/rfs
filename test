@@ -1,0 +1,41 @@
+#!/bin/bash
+
+
+test_recover_space() {
+	testfname="testfname.$$"
+	dd if=/dev/zero of=./$testfname bs=1024 count=1 2>/dev/null
+	diskfree=$(./rfs.py df| md5sum -)
+	./rfs.py put $testfname
+	diskfree2=$(./rfs.py df| md5sum -)
+	if [ "$diskfree" == "$diskfree2" ] ; then
+		echo "free space should be smaller than earlier"
+		exit 1
+	fi
+	msgid=$(./rfs.py ls -l | grep $testfname | awk '{print $1}')
+	./rfs.py rm $msgid
+	diskfree2=$(./rfs.py df| md5sum -)
+	if [ "$diskfree" != "$diskfree2" ] ; then
+		echo "free space should have been restored"
+		exit 1
+	fi
+	rm $testfname
+	echo "Passed: $FUNCNAME"
+}
+
+test_file_is_intact() {
+	testfname="testfname.$$"
+	dd if=/dev/zero of=./$testfname bs=1024 count=1 2>/dev/null
+	./rfs.py put $testfname
+	msgid=$(./rfs.py ls -l | grep $testfname | awk '{print $1}')
+	#now recover it and compare
+	mv $testfname ${testfname}.orig
+	./rfs.py get $msgid
+	cmp  $testfname ${testfname}.orig > /dev/null
+	if [ $? -ne 0 ] ; then 
+		echo orig and new file differ
+	fi
+	rm $testfname ${testfname}.orig 
+	echo "Passed: $FUNCNAME"
+}
+test_recover_space
+test_file_is_intact
