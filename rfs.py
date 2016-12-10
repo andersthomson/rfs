@@ -85,20 +85,29 @@ def load_config():
         sys.exit(1)
     return config
 
-def imap_connect(host,user,password,mailbox):
-    M = imaplib.IMAP4_SSL(host)
-    if args.debug:
-        M.debug=5
-    M.login(user,password)
-    typ, num = M.select(mailbox)
-    #print "select returned %s" %typ
-    if typ != 'OK':
-        print 'Folder %s not found, creating it' % mailbox
-        M.create(mailbox)
-        typ, num = M.select(mailbox)
+class imap4(imaplib.IMAP4_SSL):
+    def __init__(self, host):
+        imaplib.IMAP4_SSL.__init__(self,host)
+        if args.debug:
+            M.debug=5
+
+
+    def do_select(self, mailbox):
+        typ, num = imaplib.IMAP4_SSL.select(self, mailbox)
         if typ != 'OK':
-            print 'Failed to create folder. Exiting.'
-            sys.exit(1)
+            print 'Folder %s not found, creating it' % mailbox
+            imaplib.IMAP4_SSL.create(select, mailbox)
+            typ, num = imaplib.IMAP4_SSL.select(self, mailbox)
+            if typ != 'OK':
+                print 'Failed to create folder. Exiting.'
+                sys.exit(1)
+        return typ, num
+
+
+def imap_connect(host,user,password,mailbox):
+    M = imap4(host)
+    M.login(user,password)
+    typ, num = M.do_select(mailbox)
     return M
 
 def fetch_using_rfc822(M,uid):
@@ -198,8 +207,7 @@ def cmd_get(args):
         print 'msgid has to have <store>:<uid> format'
         sys.exit(1)
 
-    store=args.msgid.split(':')[0]
-    uid=args.msgid.split(':')[1]
+    store, uid = args.msgid.split(':')
 
     M = imap_connect(config.get(store, 'host'),config.get(store, 'user'),config.get(store, 'password'),config.get(store, 'mailbox'))
     
@@ -248,8 +256,7 @@ def cmd_df(args):
 def cmd_rm(args):
     config = load_config()
 
-    store=args.msgid.split(':')[0]
-    uid=args.msgid.split(':')[1]
+    store, uid = args.msgid.split(':')
     M = imap_connect(config.get(store, 'host'),config.get(store, 'user'),config.get(store, 'password'),config.get(store, 'mailbox'))
 
     #Move to Trash, then flag as deleted, then expunge it
@@ -269,12 +276,23 @@ def cmd_rm(args):
 def cmd_dump(args):
     config = load_config()
 
-    store=args.uid.split(':')[0]
-    uid=args.uid.split(':')[1]
+    store, uid =args.msgid.split(':')
     M = imap_connect(config.get(store, 'host'),config.get(store, 'user'),config.get(store, 'password'),config.get(store, 'mailbox'))
 
     typ, data = M.uid('fetch', uid, '(RFC822)')
-    print data[0][1]
+    if args.rfc822:
+        print data[0][1]
+    elif args.decode:
+        msg=email.message_from_string(data[0][1])
+        if msg.is_multipart():
+            for part in msg.walk():
+                print '== Headers'
+                for pair in part.items():
+                    print pair[0]+': '+pair[1]
+                print '-- body'
+                print part.get_payload(decode=True)
+        else:
+            print part.get_payload(decode=True)
     M.close()
     M.logout()
  
@@ -304,7 +322,8 @@ parser_rm.add_argument('msgid', help='msgid to remove')
 parser_rm.set_defaults(func=cmd_rm)
 
 parser_dump = subparsers.add_parser('dump', help='dump help')
-parser_dump.add_argument('--rfc822', action='store_true', help='dump rfc822 container',dest='rfc822')
+parser_dump.add_argument('--rfc822', action='store_true', help='dump raw rfc822 container',dest='rfc822')
+parser_dump.add_argument('--decode', action='store_true', help='dump decoded rfc822 container',dest='decode')
 parser_dump.add_argument('msgid', help='msgid to dump')
 parser_dump.set_defaults(func=cmd_dump)
 
