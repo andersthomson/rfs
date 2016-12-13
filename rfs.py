@@ -263,11 +263,11 @@ def put_fragment(config,store,fname, start, stop):
     new_uid = store.append(msg.as_string())
     return new_uid
 
-def allocate(config, size):
+def allocate(size):
     #return a list of allocations for a file
     # [ [ store, startpos in fname, stoppos in fname ], ...]
     #While honoring:
-    #   per-store fragment_size as set in config
+    #   per-store fragment_size
     #and  optimizing for:
     #   TBD
 
@@ -275,7 +275,6 @@ def allocate(config, size):
     #Get the current free space on the stores
     for s in my_stores:
         q_tot, q_used, q_avail = s.df()
-        #avail[s.name] = q_avail // 1024
         avail[s.name] = q_avail // 1024
        
     remain=size
@@ -283,8 +282,8 @@ def allocate(config, size):
     allocations=[]
     while remain>0:
         #iterate over the stores
-        for s in config.get('rfs','stores').split():
-            chunk=min(1024*avail[s],1024*int(config.get(s,'fragment_size')),remain)
+        for s in my_stores:
+            chunk=min(1024*avail[s.name],1024*int(s['fragment_size']),remain)
             #so, we can allocate chunk kbytes and it is at most what we need
             allocation=[]
             allocation = [ s, pos, pos+chunk-1]
@@ -292,8 +291,8 @@ def allocate(config, size):
             #Update file offsets
             remain -= chunk
             pos += chunk
-            #Update availability
-            avail[s] -= chunk
+            #Update avail space
+            avail[s.name] -= chunk
             if remain==0:
                 return allocations
 
@@ -306,7 +305,7 @@ def cmd_put(args):
     else:
         #FIXME: This should be dynamic based on free space etc
         store = config.get('rfs','stores').split()[1]
-    a=allocate(config, os.stat(args.fname).st_size)
+    a=allocate(os.stat(args.fname).st_size)
     for chunk in a:
         #find the store obj
         for st in my_stores:
@@ -325,7 +324,7 @@ def cmd_put(args):
     msg.attach(part)
 
     #FIXME: assume it fits in 100KB
-    toc_a=allocate(config,100*1024)
+    toc_a=allocate(100*1024)
     #print toc_a
     #print len(toc_a)
     if len(toc_a)>1:
