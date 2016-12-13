@@ -115,7 +115,7 @@ class imap4(imaplib.IMAP4_SSL):
         imaplib.IMAP4_SSL.__init__(self,host)
         if args.debug:
             print 'setting debug'
-            self.debug=5
+            self.debug=4
 
 
     def do_select(self, mailbox):
@@ -135,6 +135,7 @@ class imap4(imaplib.IMAP4_SSL):
 
 class store_c(dict):
     def __init__(self,conf,section):
+        self.name=section
         self['host']=conf.get(section,'host')
         self['user']=conf.get(section,'user')
         self['password']=conf.get(section,'password')
@@ -168,6 +169,12 @@ class store_c(dict):
         q_avail=q_total-q_used
         return [ q_total, q_used, q_avail ]
         
+    def append(self, message):
+        if not self.connected:
+            self.connect()
+        self.connection.append(self['folder'], 0, 0, message)
+        return self.connection.untagged_responses['APPENDUID'][0].split()[1]
+
 def imap_connect(host,user,password,mailbox):
     M = imap4(host)
     M.login(user,password)
@@ -252,11 +259,8 @@ def put_fragment(config,store,fname, start, stop):
         part=email.mime.application.MIMEApplication(buf)
     msg.attach(part)
 
-    #Start network interactions.
-    M = imap_connect(config.get(store, 'host'),config.get(store, 'user'),config.get(store, 'password'),config.get(store, 'mailbox'))
-    new_uid=M.do_append(config.get(store, 'mailbox'), '', '', msg.as_string())
-    M.close()
-    M.logout()
+    #Do the network interaction.
+    new_uid = store.append(msg.as_string())
     return new_uid
 
 def allocate(config, size):
@@ -267,19 +271,15 @@ def allocate(config, size):
     #and  optimizing for:
     #   TBD
 
-
     avail={}
     #Get the current free space on the stores
-    for store in config.get('rfs','stores').split():
-
-        s=store_c(config,store)
+    for s in my_stores:
         q_tot, q_used, q_avail = s.df()
-        s.disconnect()
-        avail[store] = q_avail // 1024
+        #avail[s.name] = q_avail // 1024
+        avail[s.name] = q_avail // 1024
        
     remain=size
     pos=0
-    
     allocations=[]
     while remain>0:
         #iterate over the stores
@@ -308,7 +308,11 @@ def cmd_put(args):
         store = config.get('rfs','stores').split()[1]
     a=allocate(config, os.stat(args.fname).st_size)
     for chunk in a:
-        new_uid=put_fragment(config,chunk[0],args.fname,chunk[1],chunk[2])
+        #find the store obj
+        for st in my_stores:
+            if st.name==chunk[0]:
+                break
+        new_uid=put_fragment(config,st,args.fname,chunk[1],chunk[2])
         chunk.append(new_uid)
     #Ok, now we have uploaded all fragments, make a final new message with a file ToC.
     info=finfo(fname=args.fname,start=-1,stop=-1)
@@ -431,9 +435,9 @@ def cmd_dump(args):
  
 config = load_config()
 my_confd_stores = config.get('rfs','stores').split()
-my_stores={}
+my_stores=[]
 for s in my_confd_stores:
-    my_stores[s]=store_c(config, s)
+    my_stores.append(store_c(config, s))
 
 parser = argparse.ArgumentParser(description='RFS, remote file store.')
 parser.add_argument('-d',action='store_true',help='-d debug',dest='debug')
