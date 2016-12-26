@@ -1,6 +1,50 @@
 #!/bin/bash
 
 
+do_rfs() {
+	echo ./rfs.py "$@" > /dev/stderr
+	./rfs.py "$@"
+	[ $? != 0 ] && exit
+}
+
+test_small_file() {
+	old_df=$(do_rfs df)
+	in_file=testfile.$$
+	dd if=/dev/urandom of=./$in_file bs=1M count=10 2>/dev/null
+	do_rfs put $in_file
+
+	new_df=$(do_rfs df)
+
+	for l in `seq 1 $(($(echo "$old_df"| wc -l) -1))` ; do
+		#Grab the line
+		old_val=$(echo "$old_df" | tail -n +$(($l + 1)) | head -n 1| awk '{print $3}')
+		new_val=$(echo "$new_df" | tail -n +$(($l + 1)) | head -n 1| awk '{print $3}')
+		delta=$(($new_val - $old_val))
+		#Test that the delta not negative, i.e. that the usage has gone up (or is the same due to rounding)
+		#echo $delta
+		if [ $delta -lt 0 ] ; then
+			echo "Usage mysteriously dropped"
+			echo "$old_df"
+			echo "$new_df"
+			exit 1
+		fi
+	done
+
+	old_file=${in_file}.orig
+	mv $in_file $old_file
+	do_rfs get $in_file
+
+	cmp $old_file $in_file
+
+	do_rfs rm $in_file
+	restored_df=$(./rfs.py df)
+	if [ "$old_df" != "$restored_df" ] ; then
+		diff -u <(echo "$old_df") <(echo "$restored_df")
+		exit 1
+	fi
+	echo "Passed $FUNCNAME"
+}
+
 test_recover_space() {
 	testfname="testfname.$$"
 	dd if=/dev/zero of=./$testfname bs=1024 count=1 2>/dev/null
@@ -16,6 +60,10 @@ test_recover_space() {
 	diskfree2=$(./rfs.py df| md5sum -)
 	if [ "$diskfree" != "$diskfree2" ] ; then
 		echo "free space should have been restored"
+		echo "old"
+		echo $diskfree
+		echo new
+		echo $diskfree2
 		exit 1
 	fi
 	rm $testfname
@@ -37,5 +85,6 @@ test_file_is_intact() {
 	rm $testfname ${testfname}.orig 
 	echo "Passed: $FUNCNAME"
 }
-test_recover_space
-test_file_is_intact
+#test_recover_space
+#test_file_is_intact
+test_small_file

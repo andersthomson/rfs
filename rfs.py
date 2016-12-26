@@ -125,6 +125,8 @@ def load_config():
 #            logging.info('setting debug')
 #            self.debug=6
 
+
+
 class Store(dict):
     def __init__(self,conf,section):
         self.name=section
@@ -134,96 +136,130 @@ class Store(dict):
         self['password']=conf.get(section,'password')
         self['folder']=conf.get(section,'folder')
         self['fragment_size']=conf.get(section,'fragment_size')
-        self.connected=False
-        self.selected=False
+        self.state='disconnected'
+        self.selected_folder=None
+
+    def _try_hard(self, func, *args):
+        tries=self.max_tries
+        while tries:
+            try:
+                res = func(*args)
+            except imaplib.IMAP4_SSL.error as e:
+                print 'QQQ in excption handler'
+                template = "(store/%s) An exception of type {0} occured. Arguments:\n{1!r}"
+                message = template.format(func,type(e).__name__, e.args)
+                print message
+                tries -= 1
+                self.connected=False
+                self.selected=False
+                print 'WWW sleeping in excption handler'
+                time.sleep(1)
+                continue
+            else:
+                return res
+        logging.critical('(store/%s) Faildi permatently, aborting', func)
+        sys.exit(1)
+
+    def connect_low(self):
+        self.connection=imaplib.IMAP4_SSL(self['host'])
+        if args.debug:
+            self.connection.debug=4
+        self.connection.login(self['user'],self['password'])
 
     def connect(self):
-        #self.connection = imap4(self['host'])
-        self.connection = imaplib.IMAP4_SSL(self['host'])
-        if args.debug:
-            logging.info('setting imap debug')
-            self.connection.debug=6
-        self.connection.login(self['user'],self['password'])
-        self.connected=True
+        if self.state in {'connected', 'selected'}:
+            return
+        self._try_hard(self.connect_low)
+        self.state = 'connected'
+
+    def select(self, folder='INBOX', readonly=False):
+        self.connect()
+        typ, num = self.connection.select(folder, readonly)
+        if typ != 'OK':
+            logging.warning('Folder %s not found, creating it', folder)
+            self.connection.create(folder)
+            typ, num = self.connection.select(folder, readonly)
+            if typ != 'OK':
+                logging.critical('Failed to create folder. Exiting.')
+                sys.exit(1)
+        self.state = 'selected'
+        self.selected_folder=folder
+        return typ, num
 
     def disconnect(self):
         try:
             self.connection.close()
         except:
             pass
-
         try:
             self.connection.logout()
         except:
             pass
-        self.connected=False
-        self.selected=False
+        self.state = 'disconnected'
 
     def df(self):
-        tries=self.max_tries
-        while tries:
-            if not self.connected:
-                self.connect()
-            try:
-                q_str=self.connection.getquotaroot('INBOX')
-            except imaplib.IMAP4_SSL.error as e:
-                print 'QQQ in excption handler'
-                template = "(store/df) An exception of type {0} occured. Arguments:\n{1!r}"
-                message = template.format(type(e).__name__, e.args)
-                print message
-                #logging ('Append caught exception %s',e)
-                tries -= 1
-                self.connected=False
-                print 'WWW sleeping in excption handler'
-                time.sleep(1)
-                next
-            else:
-                q_used=1024*int(q_str[1][1][0].split()[2])
-                q_total=1024*int(q_str[1][1][0].split()[3].split(')')[0])
-                q_avail=q_total-q_used
-                q_percent=100*q_used//q_total
-                return [ q_total, q_used, q_avail, q_percent]
-        logging.critical('(store/df) Faild to reconnect to %s, aborting', self.name)
-        sys/exit(1)
+        self.connect()
+        q_str = self._try_hard(self.connection.getquotaroot, 'INBOX')
+        q_used=1024*int(q_str[1][1][0].split()[2])
+        q_total=1024*int(q_str[1][1][0].split()[3].split(')')[0])
+        q_avail=q_total-q_used
+        q_percent=100*q_used//q_total
+        return [ q_total, q_used, q_avail, q_percent]
         
     def rm(self,uid):
         logging.info('Removing %s:%s',self.name,uid)
-        res = self.uid('copy', uid, '[Gmail]/Trash')
-        new_uid=self.connection.untagged_responses['COPYUID'][0].split()[2]
+        self.select(self['folder'])
+        res, data = self.uid('copy', uid, '[Gmail]/Trash')
+        try:
+            new_uid=self.connection.untagged_responses['COPYUID'][0].split()[2]
+        except:
+            pass
+        else:
+            self.uid('store',uid, '+FLAGS', '\\Deleted')
+            self.uid('expunge',uid)
+            self.select('[Gmail]/Trash')
+            self.uid('store',new_uid, '+FLAGS', '\\Deleted')
+            self.uid('expunge',new_uid)
 
-        self.uid('store',uid, '+FLAGS', '\\Deleted')
-        self.uid('expunge',uid)
-        self.select('[Gmail]/Trash')
-        self.uid('store',new_uid, '+FLAGS', '\\Deleted')
-        self.uid('expunge',new_uid)
+    def append_low(self, message):
+        #print '%s/%s' %(self.__class__.__name__, sys._getframe().f_code.co_name)
+        if not self.state in ['connected', 'selected']:
+            self.connect()
+        ret = self.connection.append(self['folder'], 0, 0, message)
+        return ret
 
     def append(self, message):
-        tries=self.max_tries
-        while tries:
-            if not self.connected:
-                self.connect()
-            try:
-                self.connection.append(self['folder'], 0, 0, message)
-            except imaplib.IMAP4_SSL.error as e:
-                print 'QQQ in excption handler'
-                template = "An exception of type {0} occured. Arguments:\n{1!r}"
-                message = template.format(type(e).__name__, e.args)
-                print message
-                #logging ('Append caught exception %s',e)
-                tries -= 1
-                self.connected=False
-                print 'WWW sleeping in excption handler'
-                time.sleep(1)
-                next
-            else:
+        res = self._try_hard(self.append_low, message)
+        ret = self.connection.untagged_responses['APPENDUID'][-1].split()[1]
+        return ret
+        #tries=self.max_tries
+        #while tries:
+        #    if not self.connected:
+        #        self.connect()
+        #    try:
+        #        self.connection.append(self['folder'], 0, 0, message)
+        #    except imaplib.IMAP4_SSL.error as e:
+        #        print 'QQQ in excption handler'
+        #        template = "An exception of type {0} occured. Arguments:\n{1!r}"
+        #        message = template.format(type(e).__name__, e.args)
+        #        print message
+        #        #logging ('Append caught exception %s',e)
+        #        tries -= 1
+        #        self.connected=False
+        #        print 'WWW sleeping in excption handler'
+        #        time.sleep(1)
+        #        next
+        #    else:
                 #Pick the last entry in the APPENDUID list
-                ret = self.connection.untagged_responses['APPENDUID'][-1].split()[1]
-                return ret
-        logging.critical('Critically failed to append to %s, giving up', self.name)
-        sys.exit(1)
+        #ret = self.connection.untagged_responses['APPENDUID'][-1].split()[1]
+        #return ret
+        #logging.critical('Critically failed to append to %s, giving up', self.name)
+        #sys.exit(1)
 
     def select(self, folder='INBOX', readonly=False):
-        if not self.connected:
+        if self.state == 'selected' and self.selected_folder == folder:
+            return
+        if not self.state =='connected':
             self.connect()
         typ, num = self.connection.select(folder, readonly)
         if typ != 'OK':
@@ -233,23 +269,62 @@ class Store(dict):
             if typ != 'OK':
                 logging.critical('Failed to create folder. Exiting.')
                 sys.exit(1)
-        self.selected = True
+        self.state = 'selected'
+        self.selected_folder=folder
         return typ, num
 
-    def uid(self,command, *args):
-        if not self.selected:
-            self.select(self['folder'])
+    def uid_low(self, command, *args):
+        if not self.selected_folder:
+            self.selected_folder=self['folder']
+        self.select(self.selected_folder)
         return self.connection.uid(command,*args)
 
-def uid2dict(store,uid):
-    typ, data = store.uid('fetch', uid, '(BODY[1])')
-    if data == [None]:
-        logging.warning('Tried to fetch a dict from %s:%s, which had no content',store.name,uid)
-        return {}
-    as_json=base64.b64decode(data[0][1])
-    as_dict=json.loads(as_json)
-    assert type(as_dict) is dict, "uid2dict will not return a dict"
-    return as_dict
+    def uid(self,command,*args):
+        r = self._try_hard(self.uid_low,command,*args)
+        return r
+
+    def uid2dict(store,uid):
+         tries=10
+         while tries:
+            store.connect()
+            try:
+                typ, data = store.uid('fetch', uid, '(BODY[1])')
+            except imaplib.IMAP4_SSL.error as e:
+                print 'QQQ in excption handler'
+                template = "An exception of type {0} occured. Arguments:\n{1!r}"
+                message = template.format(type(e).__name__, e.args)
+                print message
+                #logging ('Append caught exception %s',e)
+                tries -= 1
+                store.connected=False
+                print 'WWW sleeping in excption handler'
+                time.sleep(1)
+                continue
+            else:
+                if data == [None]:
+                    logging.warning('Tried to fetch a dict from %s:%s, and it has no content. Fsck recommended.',store.name,uid)
+                    return {}
+                as_json=base64.b64decode(data[0][1])
+                as_dict=json.loads(as_json)
+                assert type(as_dict) is dict, "uid2dict will not return a dict"
+                return as_dict
+            logging.critical('Critically failed to uid2dict(%s,%s), giving up', store.name,uid)
+            sys.exit(1)
+    def search_flagged(self):
+        self.select(self['folder'])
+        return self.uid('search', None, 'FLAGGED')
+
+    def search_all(self):
+        self.select(self['folder'])
+        return self.uid('search' ,None, 'ALL')
+
+    def store_flagged(self,uid):
+        self.select(self['folder'])
+        self.uid('STORE', uid, '+FLAGS', '\FLAGGED')
+
+    def fetch_msg(self, uid, form):
+        self.select(self['folder'])
+        return self.uid('fetch', uid, form)
 
 def dict2msgid(d):
     msg=email.mime.application.MIMEApplication(json.dumps(d,sort_keys=True,indent=4, separators=(',', ': ')),_encoder=email.encoders.encode_base64)
@@ -299,25 +374,31 @@ class Frag(dict):
         self.loaded=False
         self.backing_dev=None
 
-    def __str__(self):
-        if self.store:
-            t_str='%s' % self.store.name
-        else:
-            t_str='<undef>'
-        if self.uid:
-            t_str=t_str+':%s ' %self.uid
-        else:
-            t_str=t_str+':<undef> '
-        t_str=t_str+'(frag, %s..%s) '%(self['start'], self['stop'])
-        t_str=t_str+'\t%s' % mode2str(self['statinfo']['mode'])
-        t_str=t_str+' %s' % self['statinfo']['user']
-        t_str=t_str+' %s\t' % self['statinfo']['group']
-        t_str=t_str+' %s\t' % self['statinfo']['size']
-        t_str=t_str+'\t%s' % time.strftime('%x %X',time.localtime(self['statinfo']['mtime']))
-        t_str=t_str+'\t%s' % self['fname']
-        #t_str=t_str+'\t%s' % self['sha512']
+    def ls(self, Long=False, imap=False):
+        t_str=''
+        if imap:
+            if self.store:
+                t_str='%s' % self.store.name
+            else:
+                t_str='<undef>'
+            if self.uid:
+                t_str=t_str+':%s ' %self.uid
+            else:
+                t_str=t_str+':<undef> '
+            t_str=t_str+'(frag)\t'
+        if Long:
+            t_str=t_str+'(frag, %s..%s) '%(self['start'], self['stop'])
+            t_str=t_str+'\t%s' % mode2str(self['statinfo']['mode'])
+            t_str=t_str+' %s' % self['statinfo']['user']
+            t_str=t_str+' %s\t' % self['statinfo']['group']
+            t_str=t_str+' %s\t' % self['statinfo']['size']
+            t_str=t_str+'\t%s' % time.strftime('%x %X',time.localtime(self['statinfo']['mtime']))
+        t_str=t_str+'%s' % self['fname']
         return t_str
         
+    def __str__(self):
+        self.ls(Long=True,imap=True)
+
     def save_to_store(self,store):
         assert self.loaded == True, 'Trying to save an unloaded fragment to store'
 
@@ -346,7 +427,7 @@ class Frag(dict):
     def do_load(self):
         assert self.loaded == False, 'ERROR: Trying to load in a used fragment'
         assert self.attached == True, 'ERROR: Trying to load an unattached fragment'
-        d=uid2dict(self.store,self.uid)
+        d=self.store.uid2dict(self.uid)
         if not 'MAGIC' in d: 
             logging.warning('Tried to load a fragment without MAGIC')
             return False
@@ -374,7 +455,8 @@ class Frag(dict):
         if not self.loaded:
             self.do_load()
         if self.backing_dev == 'store':
-            typ, data = self.store.uid('fetch', self.uid, '(RFC822)')
+            #typ, data = self.store.uid('fetch', self.uid, '(RFC822)')
+            typ, data = self.store.fetch_msg(self.uid, '(RFC822)')
             msg=email.message_from_string(data[0][1])
             if not msg.is_multipart():
                 logging.critical('Error, message %s:%s is not multipart', store,uid)
@@ -416,6 +498,11 @@ class Frag(dict):
         self['fname']=fname
         self.loaded=True
         self.backing_dev='local'
+        return True
+
+    def rm(self):
+        assert self.uid != None, '(Frag/rm) Must have uid set of store is set'
+        self.store.rm(self.uid)
         return True
 
 def allocate(size):
@@ -505,9 +592,9 @@ class Fidx(dict):
         
     #uid is the uid of the index message
     def load_from_store(self, store, uid):
-        d = uid2dict(store,uid)
+        d = store.uid2dict(uid)
         if not 'MAGIC' in d: 
-            logging.warning('Tried to load a fidx without MAGIC')
+            #logging.warning('Tried to load a fidx without MAGIC')
             return False
         if d['MAGIC'] == self['MAGIC']:
             #It's a file index for sure
@@ -533,7 +620,7 @@ class Fidx(dict):
         return dict2msgid(self)
 
     def save_to_file(self):
-        for frag in self['fragments']:
+        for frag in self.frags:
             frag.save_to_file()
     
     def add_fragment(self, alloc):
@@ -571,6 +658,14 @@ class Fidx(dict):
             for chunk in res[s.name]:
                 self.add_fragment(chunk)
  
+    def rm(self):
+        assert self.loaded == True, '(Fidx/rm) Trying to rm in not loaded state'
+        for frag in self.frags:
+            frag.rm()
+        self.store.rm(self.uid)
+        self.loaded=False
+        return True
+
 class Toc(dict):
     #A toc as an unsorted array of store:uid tuples, not including fragements (only their heads)
     def __init__(self):
@@ -592,7 +687,7 @@ class Toc(dict):
         return t_str
 
     def load_from_store(self, store, uid):
-        d = uid2dict(store,uid)
+        d = store.uid2dict(uid)
         if not 'MAGIC' in d: 
             logging.warning('Tried to load a toc without MAGIC')
             return False
@@ -613,15 +708,16 @@ class Toc(dict):
     #Load from all stores, secuing that all finds are equal)
         for s in my_stores:
             #First path: Try to find a flagged and proper message
-            ret, uids = s.uid('search', None, 'FLAGGED')
+            #ret, uids = s.uid('search', None, 'FLAGGED')
+            ret, uids = s.search_flagged()
             highest_rev = 0
             wanted_uid = 0
             d={}
             for idx, uid in enumerate(uids[0].split()):
                 self.sources.append([s.name, uid])
                 if uid=='':
-                    next
-                d[idx]=uid2dict(s, uid)
+                    continue
+                d[idx]=s.uid2dict(uid)
                 if d[idx]['rev'] > highest_rev:
                     highest_rev = d[idx]['rev']
                     wanted_idx = idx
@@ -645,15 +741,20 @@ class Toc(dict):
         part['Subject']= 'rfs toc v1'
 
         for s in my_stores:
+            #print 'Saving toc as message (append)'
             new_uid = s.append(part.as_string())
-            print 'new_uid %s' %new_uid
-            s.uid('STORE', new_uid, '+FLAGS', '\FLAGGED')
-            ret, uids = s.uid('search', None, 'FLAGGED')
+            #print new_uid
+            #s.uid('STORE', new_uid, '+FLAGS', '\FLAGGED')
+            s.store_flagged(new_uid)
+            #ret, uids = s.uid('search', None, 'FLAGGED')
+            ret, uids = s.search_flagged()
             #secure only latest toc is flagged
-            print uids
+            #print 'Found these flaged mesages:'
+            #print uids
             for uid in uids[0].split():
-                print 'testing uid %s' %uid
+                #print 'testing uid %s' %uid
                 if uid != new_uid:
+                    #print 'removing %s:%s (old toc)' %(s.name,uid)
                     s.rm(uid)
 
     def add_fidx(self,fname):
@@ -662,12 +763,21 @@ class Toc(dict):
         fidx.add_statinfo(args.fname)
         new_s, new_u = fidx.save_to_store()
 
-        print 'saving rfs toc'
         #Now, after the file toc, update the rfs toc
         self.load_from_stores()
         self.add_msgid([new_s.name,new_u])
 
-       
+    def rm(self,fname):
+        for store_name, uid in self['toc']:
+            fidx=Fidx()
+            fidx.load_from_store(store_name2store(store_name),uid)
+            if fidx['fname'] == fname:
+                fidx.rm()
+                self['toc'].remove([store_name,uid])
+                return True
+        print 'File %s not found' %fname
+        logging.info('(Toc/rm) File %s not found.',fname)
+        return False
 
 #def fetch_using_rfc822(M,uid):
 #    typ, data = M.uid('fetch', uid, '(RFC822)')
@@ -692,7 +802,7 @@ def list_msgid(store,uid,Long=False,imap=False):
     frag=Frag()
     frag.attach_to_store(store,uid)
     if frag.do_load():
-        print frag
+        print frag.ls(Long=Long,imap=imap)
         return
     #test for fidx
     fidx=Fidx()
@@ -729,20 +839,21 @@ def cmd_list(args):
         t.load_from_stores()
         for s, uid in t['toc']:
             if wanted_store!= None and wanted_store!=s:
-                next
+                continue
 
             list_msgid(store_name2store(s), uid,args.format_long,args.imap)
         return
 
     for store in my_stores:
         if wanted_store!= None and wanted_store!=store.name:
-            next
+            continue
         if len(wanted_uids)==0:
-            typ, wanted_uids = store.uid('search' ,None, 'ALL')
+            #typ, wanted_uids = store.uid('search' ,None, 'ALL')
+            typ, wanted_uids = store.search_all()
             if wanted_uids[0]=='':
-                next
+                continue
         for uid in wanted_uids[0].split():
-            list_msgid(store,uid,args.format_long)
+            list_msgid(store,uid,args.format_long,args.imap)
         wanted_uids=[]
 
 def cmd_put(args):
@@ -750,82 +861,40 @@ def cmd_put(args):
     toc.add_fidx(args.fname)
     toc.save_to_stores()
     return
-    x#fidx=Fidx()
-    #a=allocate(os.stat(args.fname).st_size)
-    #for chunk in a:
-    #    frag=Frag()
-    #    frag.add_from_file(args.fname,chunk[1],chunk[2])
-    #    new_u = frag.save_to_store(chunk[0])
-    #    fidx.add_fragment([[chunk[0],new_u],chunk[1],chunk[2]])
-    #fidx.add_file(args.fname)
-    #Ok, now we have uploaded all fragments, make a final new message with a file ToC.
-    #fidx.add_statinfo(args.fname)
-
-    #FIXME: assume it fits in 100KB
-    toc_a=allocate(100*1024)
-    if len(toc_a)>1:
-        #We got an allocation split over >1 store, abort.
-        print 'FATAL: Allocation of TOC cannot straddle multiple stores'
-        sys.exit(1)
-
-    new_u = fidx.save_to_store(toc_a[0][0])
-
-    print 'saving rfs toc'
-    #Now, after the file toc, update the rfs toc
-    rfs_toc=Toc()
-    rfs_toc.load_from_stores()
-    rfs_toc.add_msgid([toc_a[0][0].name,new_u])
-    rfs_toc.save_to_stores()
 
 def cmd_get(args):
-
-    if not ':' in args.msgid:
-        print 'msgid has to have <store>:<uid> format'
+    if ':' in args.msgid:
+        store_name, uid = args.msgid.split(':')
+        store = store_name2store(store_name)
+        #Test for frag
+        frag=Frag()
+        frag.attach_to_store(store,uid)
+        if frag.do_load():
+            frag.save_to_file()
+            return
+        #test for fidx
+        fidx=Fidx()
+        if fidx.load_from_store(store,uid):
+            fidx.save_to_file()
+            return
+        print 'Got a \':\', but it\'s not a fragment, nor file index.'
         sys.exit(1)
-
-    store_name, uid = args.msgid.split(':')
-    store = store_name2store(store_name)
-
-    #Test for frag
-    frag=Frag()
-    frag.attach_to_store(store,uid)
-    if frag.do_load():
-        frag.save_to_file()
-        return
-    #test for fidx
-    fidx=Fidx()
-    if fidx.load_from_store(store,uid):
-        print fidx
-        return
-    print 'store %s, uid %s, has unknown content' %(store.name,uid)
-    return
-    typ, data = s.uid('fetch', uid, '(RFC822)')
-    msg=email.message_from_string(data[0][1])
-    if not msg.is_multipart():
-        print 'Error, message uid %s in store %s is not multipart' %(uid,store)
-        quit()
-    #loop the payload to find the relevant parts
-    for payload in msg.get_payload():
-        try:
-            finf = finfo(json_str=payload.get_payload(decode=True))
-        except ValueError:
-            #Save the ref
-            pl=payload
-            #Not valid json, continue the loop
-            continue
-    #FIXME update the metadata as well
-    if finf.get_fname()=='':
-        fname='rfs_temp_name'
-        print 'WARNING: No filename found, using rts_temp_name'
     else:
-        fname=finf.get_fname()
-    f = open(fname,'wb')
-    f.write(pl.get_payload(decode=True))
-    f.close()
-
-    fhash=hashfile(fname,0,os.stat(fname).st_size-1)
-    if fhash != finf.get_sha512():
-        print 'ERROR: Retrieved file does not match expected sha512'
+        wanted_fname=args.msgid
+        #translate it to a store:uid
+        toc=Toc()
+        toc.load_from_stores()
+        for store_name,uid in toc['toc']:
+            store = store_name2store(store_name)
+            fidx=Fidx()
+            if fidx.load_from_store(store,uid):
+                fname = fidx.ls()
+                #print 'found fname=%s' %fname
+                if fname == wanted_fname:
+                    fidx.save_to_file()
+                    return
+        print 'Could not find %s in toc' %wanted_fname
+        sys.exit(1)
 
 def cmd_df(args):
     config = load_config()
@@ -839,11 +908,34 @@ def cmd_df(args):
 
 
 def cmd_rm(args):
-    store, uid = args.msgid.split(':')
-    for s in my_stores:
-        if s.name == store:
-            break
-    s.rm(uid)
+    if ':' in args.msgid:
+        store_name, uid = args.msgid.split(':')
+        store = store_name2store(store_name)
+        #Test for frag
+        frag=Frag()
+        frag.attach_to_store(store,uid)
+        #Need to do_load() to veryfy that it is a frag
+        if frag.do_load():
+            frag.rm()
+            return
+        #test for fidx
+        fidx=Fidx()
+        if fidx.load_from_store(store,uid):
+            fidx.rm()
+            return
+        print 'Got a \':\', but it\'s not a fragment, nor file index.'
+        sys.exit(1)
+    else:
+        fname=args.msgid
+        #translate it to a store:uid
+        toc=Toc()
+        toc.load_from_stores()
+        if toc.rm(fname):
+            toc.save_to_stores()
+            return
+        else:
+            print 'Could not find %s in toc' %wanted_fname
+            sys.exit(1)
 
 def cmd_dump(args):
     store, uid = args.msgid.split(':')
@@ -851,12 +943,14 @@ def cmd_dump(args):
         if s.name == store:
             break
 
-
     if args.bodystructure:
-        typ, data = s.uid('fetch', uid, '(BODYSTRUCTURE)')
+        #typ, data = s.uid('fetch', uid, '(BODYSTRUCTURE)')
+        typ, data = s.fetch_msg(uid, '(BODYSTRUCTURE)')
         print data
         return
-    typ, data = s.uid('fetch', uid, '(RFC822)')
+    #typ, data = s.uid('fetch', uid, '(RFC822)')
+    typ, data = s.fetch_msg(uid,'(RFC822)')
+    print data
     if args.rfc822:
         print data[0][1]
     elif args.decode:
@@ -874,7 +968,8 @@ def cmd_dump(args):
 def cmd_gen_toc(args):
     toc=Toc()
     for store in my_stores:
-        typ, wanted_uids = store.uid('search' ,None, 'ALL')
+        #typ, wanted_uids = store.uid('search' ,None, 'ALL')
+        typ, wanted_uids = store.search_all()
         for uid in wanted_uids[0].split():
             #Fast path
             finf=fetch_using_body_one(store,uid)
@@ -885,6 +980,51 @@ def cmd_gen_toc(args):
     print toc
     toc.save_to_stores()
 
+def cmd_fsck(args):
+    #Lisft all structures from the stores
+    frags=[]
+    fidxs=[]
+    tocs=[]
+    for store in my_stores:
+        typ, wanted_uids = store.search_all()
+        if wanted_uids[0]=='':
+            contnue
+        for uid in wanted_uids[0].split():
+            #Test for frag
+            frag=Frag()
+            frag.attach_to_store(store,uid)
+            if frag.do_load():
+                #It's a frag for sure, add it
+                frags.append(frag)
+                continue
+            #test for fidx
+            fidx=Fidx()
+            if fidx.load_from_store(store,uid):
+                fidxs.append(fidx)
+                continue
+            #test for toc
+            toc=Toc()
+            if toc.load_from_store(store,uid):
+                tocs.append(toc)
+                continue
+            print '%s:%s, has unknown content' %(store.name,uid)
+    #Run the checks
+    # frag:
+    # * Check for orphan frags
+    # * Check for duplicate frags
+    # * Validate checksum (expensive!)
+    # frag(s) in fidx context:
+    # * Check for overlapping frags
+    # * Check for differing metadata
+    # * Validate checksum (super expensive!)
+    # * Check for missing frags ("sparse" fidx)
+    # fidx(s) in toc context:
+    # * Check for orphan fidxs
+    # * Check for duplicate fidxs
+    # Toc:
+    # * Check for mismatching tocs
+    # * Check for missing fidxs
+    # * 
 
 
 config = load_config()
@@ -894,7 +1034,7 @@ for s in my_confd_stores:
     my_stores.append(Store(config, s))
 
 
-logging.basicConfig(stream=sys.stderr, level=logging.DEBUG)
+logging.basicConfig(stream=sys.stderr, level=logging.WARNING)
 
 parser = argparse.ArgumentParser(description='RFS, remote file store.')
 parser.add_argument('-d',action='store_true',help='-d debug',dest='debug')
@@ -934,6 +1074,8 @@ parser_dump.set_defaults(func=cmd_dump)
 parser_gen_toc = subparsers.add_parser('gen_toc', help='rm help')
 parser_gen_toc.set_defaults(func=cmd_gen_toc)
 
+parser_fsck = subparsers.add_parser('fsck', help='Checks integrity of the stored structures and fixes problems.')
+parser_fsck.set_defaults(func=cmd_gen_toc)
 
 args = parser.parse_args()
 args.func(args)
